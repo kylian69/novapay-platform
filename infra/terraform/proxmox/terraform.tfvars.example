@@ -1,0 +1,39 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# FICHIER EXEMPLE — Copier en terraform.tfvars et adapter.
+# NE JAMAIS commiter terraform.tfvars (déjà dans .gitignore : *.tfvars).
+# La valeur sensible proxmox_api_token doit venir de Vault ou des secrets CI.
+# ──────────────────────────────────────────────────────────────────────────────
+
+proxmox_endpoint_a = "https://192.168.1.XXX:8006"
+proxmox_endpoint_b = "https://192.168.1.XXX:8006"
+proxmox_api_token  = "terraform@pve!novapay=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
+proxmox_insecure   = true
+
+proxmox_node_a = "pve-a"
+proxmox_node_b = "pve-b"
+vm_datastore   = "local-lvm"
+
+network_gateway = "192.168.1.1"
+network_bridge  = "vmbr0"
+network_prefix  = 24
+dns_servers     = ["1.1.1.1", "8.8.8.8"]
+
+vm_template_id    = 9000
+vm_user           = "novapay"
+vm_ssh_public_key = "ssh-ed25519 AAAA... novapay@bastion"
+
+# IPs cluster prod
+prod_cp1_ip     = "192.168.1.20"
+prod_cp2_ip     = "192.168.1.21"
+prod_worker1_ip = "192.168.1.30"
+prod_worker2_ip = "192.168.1.31"
+prod_worker3_ip = "192.168.1.32"
+prod_vip        = "192.168.1.100"
+
+# IPs cluster staging
+staging_cp_ip      = "192.168.1.40"
+staging_worker1_ip = "192.168.1.50"
+staging_worker2_ip = "192.168.1.51"
+
+# Poste de pilotage
+bastion_ip = "192.168.1.10"
