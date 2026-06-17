@@ -140,15 +140,13 @@ jobs:
           cosign sign --yes \
             "${{ env.IMAGE_PREFIX }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}"
 
-      # ── SLSA : attestation de provenance ──
+      # ── Attestation de provenance SLSA (GitHub native) ──
       - name: Generate SLSA provenance attestation
-        uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2
+        uses: actions/attest-build-provenance@v2
         with:
-          image: "${{ env.IMAGE_PREFIX }}/${{ matrix.service }}"
-          digest: "${{ steps.build.outputs.digest }}"
-          registry-username: ${{ github.actor }}
-          registry-password: ${{ secrets.GITHUB_TOKEN }}
-        # Note : génère une attestation SLSA Build L2/L3 vérifiable via cosign verify-attestation
+          subject-name: "${{ env.IMAGE_PREFIX }}/${{ matrix.service }}"
+          subject-digest: "${{ steps.build.outputs.digest }}"
+          push-to-registry: true
 
       # ── Syft : génération SBOM CycloneDX ──
       - name: Install Syft
