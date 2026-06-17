@@ -93,20 +93,14 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$FILE"
 
-          COMMIT_MSG="chore(${SERVICE}): promote to production
-
-Image: ghcr.io/${{ github.repository_owner }}/novapay/${SERVICE}@${DIGEST}
-Promoted from: staging
-Signature: verified (Cosign keyless OIDC)
-SBOM: verified (CycloneDX attached)"
+          printf 'chore(%s): promote to production\n\nImage: ghcr.io/%s/novapay/%s@%s\nPromoted from: staging\nSignature: verified (Cosign keyless OIDC)\nSBOM: verified (CycloneDX attached)' \
+            "$SERVICE" "${{ github.repository_owner }}" "$SERVICE" "$DIGEST" > /tmp/commit_msg.txt
 
           if [ -n "$TICKET" ]; then
-            COMMIT_MSG="${COMMIT_MSG}
-
-${TICKET} #done"
+            printf '\n\n%s #done' "$TICKET" >> /tmp/commit_msg.txt
           fi
 
-          git diff --staged --quiet || (git commit -m "$COMMIT_MSG" && git push)
+          git diff --staged --quiet || (git commit -F /tmp/commit_msg.txt && git push)
 
       # ArgoCD détecte le commit et synchronise prod automatiquement
       # via le sync policy configuré sur l'Application prod

@@ -195,11 +195,7 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add "$FILE"
-            git diff --staged --quiet || \
-              git commit -m "chore(${SVC}): update staging image digest
-
-Image: ${{ env.IMAGE_PREFIX }}/${SVC}@${DIGEST}
-Signed: Cosign keyless OIDC
-SBOM: CycloneDX attaché au registry" && \
-              git push
+            printf 'chore(%s): update staging image digest\n\nImage: %s/%s@%s\nSigned: Cosign keyless OIDC\nSBOM: CycloneDX attached' \
+              "$SVC" "${{ env.IMAGE_PREFIX }}" "$SVC" "$DIGEST" > /tmp/commit_msg.txt
+            git diff --staged --quiet || (git commit -F /tmp/commit_msg.txt && git push)
           fi
