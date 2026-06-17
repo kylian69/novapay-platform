@@ -17,3 +17,4 @@ variable "proxmox_username" {
   description = "Utilisateur Proxmox (ex: root@pam)"
   type        = string
 }
+# updated
