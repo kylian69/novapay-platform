@@ -96,17 +96,27 @@ jobs:
 
       - name: Validate platform manifests
         run: |
-          find platform/ -name "*.yaml" -o -name "*.yml" | \
-            xargs kubeconform -strict -summary -kubernetes-version 1.35.0 \
-              -skip HelmRelease,Application,ApplicationSet,ExternalSecret,ClusterSecretStore \
-              -ignore-missing-schemas
+          FILES=$(find platform/ -name "*.yaml" -o -name "*.yml" | grep -v ".gitkeep" || true)
+          if [ -z "$FILES" ]; then
+            echo "ℹ️  Aucun manifest dans platform/ — skip"
+            exit 0
+          fi
+          echo "$FILES" | xargs kubeconform -strict -summary \
+            -kubernetes-version 1.35.0 \
+            -skip HelmRelease,Application,ApplicationSet,ExternalSecret,ClusterSecretStore \
+            -ignore-missing-schemas
 
       - name: Validate cluster manifests
         run: |
-          find clusters/ -name "*.yaml" -o -name "*.yml" | \
-            xargs kubeconform -strict -summary -kubernetes-version 1.35.0 \
-              -skip Application,ApplicationSet \
-              -ignore-missing-schemas
+          FILES=$(find clusters/ -name "*.yaml" -o -name "*.yml" | grep -v ".gitkeep" || true)
+          if [ -z "$FILES" ]; then
+            echo "ℹ️  Aucun manifest dans clusters/ — skip"
+            exit 0
+          fi
+          echo "$FILES" | xargs kubeconform -strict -summary \
+            -kubernetes-version 1.35.0 \
+            -skip Application,ApplicationSet \
+            -ignore-missing-schemas
 
   # ─────────────────────────────────────────
   # JOB 4 : Conftest — OPA policies
@@ -119,8 +129,10 @@ jobs:
 
       - name: Install Conftest
         run: |
-          curl -sL https://github.com/open-policy-agent/conftest/releases/latest/download/conftest_Linux_x86_64.tar.gz \
+          CONFTEST_VERSION="0.57.0"
+          curl -sL "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
             | tar xz && sudo mv conftest /usr/local/bin/
+          conftest --version
 
       - name: Run Conftest on platform manifests
         run: |
