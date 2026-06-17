@@ -1,0 +1,205 @@
+name: CI — Application Build & Security
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "apps/**"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "apps/**"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/novapay
+
+jobs:
+  # ─────────────────────────────────────────
+  # JOB 1 : Détection des services modifiés
+  # ─────────────────────────────────────────
+  detect-changes:
+    name: Detect changed services
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect changed apps
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            api-gateway:
+              - 'apps/api-gateway/**'
+            payment-svc:
+              - 'apps/payment-svc/**'
+            notification-svc:
+              - 'apps/notification-svc/**'
+
+  # ─────────────────────────────────────────
+  # JOB 2 : Lint Helm charts
+  # ─────────────────────────────────────────
+  helm-lint:
+    name: Lint Helm charts
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.services != '[]' }}
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Helm lint
+        run: helm lint apps/${{ matrix.service }}/chart
+
+      - name: Install kubeconform
+        run: |
+          curl -sL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar xz && sudo mv kubeconform /usr/local/bin/
+
+      - name: Validate manifests (kubeconform)
+        run: |
+          helm template apps/${{ matrix.service }}/chart \
+            | kubeconform -strict -summary -kubernetes-version 1.35.0
+
+  # ─────────────────────────────────────────
+  # JOB 3 : Build + Scan + Sign + SBOM
+  # ─────────────────────────────────────────
+  build-sign:
+    name: Build, Scan, Sign & SBOM — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: [detect-changes, helm-lint]
+    if: ${{ needs.detect-changes.outputs.services != '[]' }}
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # requis pour Cosign OIDC keyless
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=ref,event=branch
+
+      - name: Build image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/${{ matrix.service }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # ── Trivy : scan CVE avec priorisation EPSS ──
+      - name: Scan image — Trivy (CRITICAL/HIGH + EPSS)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ env.IMAGE_PREFIX }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}"
+          format: "sarif"
+          output: "trivy-${{ matrix.service }}.sarif"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"          # bloque le pipeline si CVE trouvée
+          vuln-type: "os,library"
+        env:
+          TRIVY_ENABLE_VULN_DB_CACHE: true
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-${{ matrix.service }}.sarif"
+
+      # ── Cosign : signature keyless OIDC ──
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (Cosign keyless)
+        run: |
+          cosign sign --yes \
+            "${{ env.IMAGE_PREFIX }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}"
+
+      # ── SLSA : attestation de provenance ──
+      - name: Generate SLSA provenance attestation
+        uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2
+        with:
+          image: "${{ env.IMAGE_PREFIX }}/${{ matrix.service }}"
+          digest: "${{ steps.build.outputs.digest }}"
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+        # Note : génère une attestation SLSA Build L2/L3 vérifiable via cosign verify-attestation
+
+      # ── Syft : génération SBOM CycloneDX ──
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: "${{ env.IMAGE_PREFIX }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}"
+          format: cyclonedx-json
+          output-file: "sbom-${{ matrix.service }}.cdx.json"
+
+      - name: Attach SBOM to image (OCI artifact)
+        run: |
+          cosign attach sbom \
+            --sbom sbom-${{ matrix.service }}.cdx.json \
+            --type cyclonedx \
+            "${{ env.IMAGE_PREFIX }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}"
+
+      - name: Upload SBOM as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.service }}
+          path: sbom-${{ matrix.service }}.cdx.json
+          retention-days: 90
+
+      # ── Export du digest pour la promotion ──
+      - name: Export image digest
+        run: |
+          echo "IMAGE_DIGEST=${{ steps.build.outputs.digest }}" >> $GITHUB_ENV
+          echo "SERVICE=${{ matrix.service }}" >> $GITHUB_ENV
+
+      - name: Update image digest in GitOps repo
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          # Met à jour le tag d'image dans l'overlay staging
+          # ArgoCD détectera le changement et synchronisera automatiquement
+          DIGEST="${{ steps.build.outputs.digest }}"
+          SVC="${{ matrix.service }}"
+          FILE="apps/${SVC}/overlays/staging/kustomization.yaml"
+
+          if [ -f "$FILE" ]; then
+            sed -i "s|newTag:.*|newTag: \"${DIGEST}\"|g" "$FILE"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "$FILE"
+            git diff --staged --quiet || \
+              git commit -m "chore(${SVC}): update staging image digest
+
+Image: ${{ env.IMAGE_PREFIX }}/${SVC}@${DIGEST}
+Signed: Cosign keyless OIDC
+SBOM: CycloneDX attaché au registry" && \
+              git push
+          fi

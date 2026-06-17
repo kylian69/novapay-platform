@@ -1,0 +1,125 @@
+name: Promote — Staging → Production
+
+# Déclenché manuellement OU automatiquement après validation staging
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service à promouvoir (api-gateway | payment-svc | notification-svc)"
+        required: true
+        type: choice
+        options:
+          - api-gateway
+          - payment-svc
+          - notification-svc
+      digest:
+        description: "Image digest à promouvoir (sha256:...)"
+        required: true
+        type: string
+      jira_ticket:
+        description: "Ticket Jira associé (ex: NOVA-21)"
+        required: false
+        type: string
+
+  # Promotion automatique depuis ci-app.yml (après synchro staging réussie)
+  repository_dispatch:
+    types: [staging-validated]
+
+jobs:
+  # ─────────────────────────────────────────
+  # JOB 1 : Vérifications pré-promotion
+  # ─────────────────────────────────────────
+  pre-promotion-checks:
+    name: Pre-promotion checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Verify image signature (Cosign)
+        run: |
+          SERVICE="${{ github.event.inputs.service || github.event.client_payload.service }}"
+          DIGEST="${{ github.event.inputs.digest || github.event.client_payload.digest }}"
+          IMAGE="ghcr.io/${{ github.repository_owner }}/novapay/${SERVICE}@${DIGEST}"
+
+          echo "Vérification de la signature Cosign pour : $IMAGE"
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$IMAGE"
+          echo "✅ Signature Cosign valide"
+
+      - name: Verify SBOM attached
+        run: |
+          SERVICE="${{ github.event.inputs.service || github.event.client_payload.service }}"
+          DIGEST="${{ github.event.inputs.digest || github.event.client_payload.digest }}"
+          IMAGE="ghcr.io/${{ github.repository_owner }}/novapay/${SERVICE}@${DIGEST}"
+
+          echo "Vérification de la présence du SBOM CycloneDX..."
+          cosign download sbom "$IMAGE" > /dev/null && echo "✅ SBOM présent" || \
+            (echo "❌ SBOM manquant — promotion bloquée" && exit 1)
+
+  # ─────────────────────────────────────────
+  # JOB 2 : Promotion vers prod
+  # ─────────────────────────────────────────
+  promote-to-prod:
+    name: Promote to production
+    runs-on: ubuntu-latest
+    needs: pre-promotion-checks
+    environment: production   # requiert une approbation manuelle dans GitHub Environments
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update prod overlay with new digest
+        run: |
+          SERVICE="${{ github.event.inputs.service || github.event.client_payload.service }}"
+          DIGEST="${{ github.event.inputs.digest || github.event.client_payload.digest }}"
+          TICKET="${{ github.event.inputs.jira_ticket || github.event.client_payload.jira_ticket }}"
+          FILE="apps/${SERVICE}/overlays/prod/kustomization.yaml"
+
+          if [ ! -f "$FILE" ]; then
+            echo "❌ Fichier $FILE introuvable"
+            exit 1
+          fi
+
+          echo "Promotion de ${SERVICE} vers prod avec digest ${DIGEST}"
+          sed -i "s|newTag:.*|newTag: \"${DIGEST}\"|g" "$FILE"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$FILE"
+
+          COMMIT_MSG="chore(${SERVICE}): promote to production
+
+Image: ghcr.io/${{ github.repository_owner }}/novapay/${SERVICE}@${DIGEST}
+Promoted from: staging
+Signature: verified (Cosign keyless OIDC)
+SBOM: verified (CycloneDX attached)"
+
+          if [ -n "$TICKET" ]; then
+            COMMIT_MSG="${COMMIT_MSG}
+
+${TICKET} #done"
+          fi
+
+          git diff --staged --quiet || (git commit -m "$COMMIT_MSG" && git push)
+
+      # ArgoCD détecte le commit et synchronise prod automatiquement
+      # via le sync policy configuré sur l'Application prod
+
+      - name: Summary
+        run: |
+          SERVICE="${{ github.event.inputs.service || github.event.client_payload.service }}"
+          DIGEST="${{ github.event.inputs.digest || github.event.client_payload.digest }}"
+          echo "## ✅ Promotion réussie" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service** : \`${SERVICE}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Digest** : \`${DIGEST}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cible** : cluster \`prod\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **ArgoCD** : synchronisation déclenchée automatiquement" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> Vérifier la synchro sur ArgoCD avant de clore le ticket Jira." >> $GITHUB_STEP_SUMMARY

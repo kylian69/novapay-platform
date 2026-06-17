@@ -1,0 +1,157 @@
+name: CI — Infrastructure as Code
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "infra/**"
+      - "platform/**"
+      - "clusters/**"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "infra/**"
+      - "platform/**"
+      - "clusters/**"
+
+jobs:
+  # ─────────────────────────────────────────
+  # JOB 1 : Checkov — scan sécurité IaC
+  # ─────────────────────────────────────────
+  checkov:
+    name: Checkov IaC Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov (Terraform)
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: infra/terraform
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov-terraform.sarif
+          soft_fail: false   # bloque si findings HIGH/CRITICAL
+
+      - name: Run Checkov (Kubernetes manifests)
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: platform
+          framework: kubernetes
+          output_format: sarif
+          output_file_path: checkov-k8s.sarif
+          soft_fail: false
+
+      - name: Upload Checkov results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-terraform.sarif
+
+  # ─────────────────────────────────────────
+  # JOB 2 : Terraform format + validate
+  # ─────────────────────────────────────────
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module:
+          - infra/terraform/proxmox
+          - infra/terraform/dns
+          - infra/terraform/cloud-ephemeral
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: ${{ matrix.module }}
+
+      - name: Terraform Init
+        run: terraform init -backend=false
+        working-directory: ${{ matrix.module }}
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: ${{ matrix.module }}
+
+  # ─────────────────────────────────────────
+  # JOB 3 : Validation manifests Kubernetes
+  # ─────────────────────────────────────────
+  k8s-validate:
+    name: Kubernetes Manifests Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar xz && sudo mv kubeconform /usr/local/bin/
+
+      - name: Validate platform manifests
+        run: |
+          find platform/ -name "*.yaml" -o -name "*.yml" | \
+            xargs kubeconform -strict -summary -kubernetes-version 1.35.0 \
+              -skip HelmRelease,Application,ApplicationSet,ExternalSecret,ClusterSecretStore \
+              -ignore-missing-schemas
+
+      - name: Validate cluster manifests
+        run: |
+          find clusters/ -name "*.yaml" -o -name "*.yml" | \
+            xargs kubeconform -strict -summary -kubernetes-version 1.35.0 \
+              -skip Application,ApplicationSet \
+              -ignore-missing-schemas
+
+  # ─────────────────────────────────────────
+  # JOB 4 : Conftest — OPA policies
+  # ─────────────────────────────────────────
+  conftest:
+    name: OPA Policy Check (Conftest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Conftest
+        run: |
+          curl -sL https://github.com/open-policy-agent/conftest/releases/latest/download/conftest_Linux_x86_64.tar.gz \
+            | tar xz && sudo mv conftest /usr/local/bin/
+
+      - name: Run Conftest on platform manifests
+        run: |
+          if [ -d "platform/kyverno-policies/tests" ]; then
+            conftest test platform/ --policy platform/kyverno-policies/tests/
+          else
+            echo "No Conftest policies found yet — skipping"
+          fi
+
+  # ─────────────────────────────────────────
+  # JOB 5 : Trivy — scan filesystem IaC
+  # ─────────────────────────────────────────
+  trivy-iac:
+    name: Trivy IaC Misconfiguration Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan (IaC)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-iac.sarif"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          scanners: "misconfig,secret"   # détecte aussi les secrets accidentels
+
+      - name: Upload Trivy IaC results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-iac.sarif
